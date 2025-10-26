@@ -1,34 +1,200 @@
 ---
-title: "EV Power - Lab 4 Project Report"
+title: "U.S. EV registrations vs. energy cleanliness (2023)"
 format: typst
 ---
 
-# Example Solution 1
+
+# Overview
+"The main research question of this project is: does the electricity used to charge electric vehicles (EVs) really come from clean energy? To explore this, this report will focus on a more specific question: are EV registrations concentrated in states with cleaner energy mixes? This analysis will use 2023 data for comparison."
 
 ## **Part 0: libraries**
 
-```{r}
-
-```
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+````
 
 ## **Part 1:** **Defining Research Question**
 
-Chosen Question:
+“Are EV registrations concentrated in states with cleaner energy mixes?”
 
 ## **Part 2: Data Preparation and Cleaning**
 
-```{r}
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+ev_regs_2023_raw <- read_csv("data/ev-registrations-by-state-2023.csv", skip = 2)
+ev_regs_2023_clean <- ev_regs_2023_raw %>%
+    rename(state = STATE,
+    count_evs = `Count-EVs`) %>%
+        mutate(
+            count_evs_cleaned_text = str_remove_all(count_evs, "[^0-9]"),
+            count_evs = as.numeric(count_evs_cleaned_text)
+        ) %>%
+        select(state, count_evs)
+````
 
-```
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+renewable_files <- c("data/renew-use-2021.csv",
+"data/renew-use-2022.csv", "data/renew-use-2023.csv")
+renewable_use_raw <- map_dfr(renewable_files, read_csv, .id = "source_file")
+renewable_use_clean <- renewable_use_raw %>%
+    pivot_longer(
+        cols = starts_with("Renewable_Use_"),
+        names_to = "year_raw",
+        values_to = "usage_raw"
+    ) %>%
+    filter(!is.na(usage_raw)) %>%
+    mutate(
+        usage_cleaned_text = str_remove_all(usage_raw, "[^0-9]"),
+        usage = as.numeric(usage_cleaned_text),
+        year = str_extract(year_raw, "[0-9]+")
+    ) %>%
+    rename(state_abb = State,
+    energy_source = Energy_Source) %>%
+    select(state_abb, energy_source, year, usage)
+````
+
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+total_files <- c("data/total-use-2021.csv", "data/total-use-2022.csv", "data/total-use-2023.csv")
+total_use_raw <- map_dfr(total_files, read_csv, .id="source_file")
+total_use_clean <- total_use_raw %>%
+    pivot_longer(
+        cols = -c(source_file, Energy_Source),
+        names_to = "state_abb",
+        values_to = "usage"
+    ) %>%
+    filter(state_abb != "US") %>%
+    mutate(
+        year_numeric = as.numeric(source_file) + 2020,
+        year = as.character(year_numeric)
+    ) %>%
+    group_by(state_abb, year) %>%
+    summarise(
+        total_usage = sum(usage, na.rm = TRUE)
+    ) %>%
+    ungroup()
+````
+
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+renewable_spellings <- c(
+  "total_renewable_energy",  
+  "total_renewables",        
+  "total renewable-energy"   
+)
+renewable_total_clean <- total_use_raw %>%
+    pivot_longer(
+        cols = -c(source_file, Energy_Source),
+        names_to = "state_abb",
+        values_to = "usage"
+    ) %>%
+    filter(Energy_Source %in% renewable_spellings) %>%
+    filter(state_abb != "US") %>%
+    mutate(
+        year_numeric = as.numeric(source_file) + 2020,
+        year = as.character(year_numeric)
+    ) %>%
+    rename(renewable_usage = usage) %>%
+    select(state_abb, year, renewable_usage)
+````
 
 ## **Part 3: Joining / Pivoting Datasets for Analysis**
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+energy_data_clean <- left_join(
+    total_use_clean,
+    renewable_total_clean,
+    by = c("state_abb", "year")
+)
+energy_final <- energy_data_clean %>%
+    mutate(
+        percent_renewable = if_else(
+            total_usage >0,
+            (renewable_usage / total_usage) * 100,
+            0
+        )
+    )
+````
 
-```{r}
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+state_lookup <- tibble(
+    state = state.name,
+    state_abb = state.abb
+)
+ev_regs_with_abb <- ev_regs_2023_clean %>%
+    left_join(state_lookup, by = "state")
+energy_2023 <- energy_final %>%
+    filter(year == "2023")
 
-```
+final_data_for_map <- left_join(
+    energy_2023, 
+    ev_regs_with_abb,
+    by = "state_abb"
+)
+````
+````{r echo=FALSE}
+head(final_data_for_map)
+````
 
 ## **Part 4: Mapping Visualization**
 
-```{r}
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+library(sf)
+library(tigris)
+library(viridis)
+````
 
-```
+````{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+states_map_sf <- states(cb = TRUE, resolution = "5m", class = "sf")
+map_and_data <- states_map_sf %>%
+    left_join(
+        final_data_for_map,
+        by = c("STUSPS" = "state_abb")
+    ) %>%
+    filter(
+        !is.na(percent_renewable),
+        STUSPS != "AK",
+        STUSPS != "HI"
+    )
+````
+
+"The figure below shows our analysis results. The base color of each state represents its percentage of renewable energy (the brighter the color, the higher the percentage), while the size of the circle at the center of each state represents the state's total EV registrations."
+````{r echo=FALSE, message=FALSE, warning=FALSE}
+points_data <- map_and_data %>%
+    filter(!is.na(count_evs)) %>%
+    mutate(
+        centroid_geom = st_centroid(geometry),
+        x_coord = st_coordinates(centroid_geom)[,1],
+        y_coord = st_coordinates(centroid_geom)[,2]
+    )
+
+final_map <- ggplot() +  
+    geom_sf(
+        data = map_and_data, 
+        aes(fill = percent_renewable),
+        color = "white",
+        linewidth = 0.5
+    ) +
+    geom_point(
+        data = points_data,
+        aes(x = x_coord, y = y_coord, size = count_evs), 
+        color = "black",
+        alpha = 0.5
+    ) +
+    scale_fill_viridis_c(
+        option = "C"
+    ) +
+    scale_size_area(max_size = 10) +
+    labs(
+        title = "U.S. EV registrations vs. energy cleanliness (2023)",
+        subtitle = "Circle size represents total EV registrations. \nState shading represents the percentage of total energy use from renewable sources.",
+        fill = "Renewable energy percentage (%)",
+        size = "EV registration count",
+        caption = "Data sources: U.S. Energy Information Administration (EIA) & state registry data"
+    ) +
+    theme_void()
+
+final_map
+````
+
+"California (CA): It's a huge circle, and the background color is very bright. This supports the view that "EVs are popular in clean-energy states."
+
+Texas (TX) or Florida (FL): They also have large circles, but their background colors is very dark (low share of renewable energy). This contradicts that view."
+
+"The analysis is complex. On one hand, California — which has the highest number of EV registrations — has a relatively high share of renewable energy. On the other hand, other states with large EV registrations (such as Texas and Florida) have relatively low shares of renewables. This suggests that although EVs are popular in some clean-energy states, many EVs nationwide still rely on grids powered by non-clean energy."
